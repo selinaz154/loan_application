@@ -4,9 +4,29 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import re
-import requests
-import time
+
+import plotly.express as px
+import plotly.graph_objects as go
+import plotly.io as pio
+pd.options.plotting.backend = 'plotly'
+
+from IPython.display import display
+
+# DSC 80 preferred styles
+pio.templates["dsc80"] = go.layout.Template(
+    layout=dict(
+        margin=dict(l=30, r=30, t=30, b=30),
+        autosize=True,
+        width=600,
+        height=400,
+        xaxis=dict(showgrid=True),
+        yaxis=dict(showgrid=True),
+        title=dict(x=0.5, xanchor="center"),
+    )
+)
+pio.templates.default = "simple_white+dsc80"
+import warnings
+warnings.filterwarnings("ignore")
 
 
 # ---------------------------------------------------------------------
@@ -14,48 +34,33 @@ import time
 # ---------------------------------------------------------------------
 
 
-def get_book(url):
-    def check_robots():
-        global delay_time
-        robots_url = "https://gutenberg.org/robots.txt"
-        response = requests.get(robots_url)
-        if response.status_code == 200:
-            match = re.search(r"Crawl-delay: (\d+)", response.text)
-            if match:
-                delay_time = int(match.group(1))
-            else:
-                delay_time = 0.5
-# Check robots.txt for Crawl-delay before making requests
-    check_robots()
-    time.sleep(delay_time)# Pause before making the request
-    response = requests.get(url)
-    if response.status_code != 200:
-        time.sleep(delay_time)
-        response = requests.get(url)
-    text = response.text
-    # Normalize line endings
-    text = text.replace('\r\n', '\n')
+def clean_loans(loans):
+    loans_copy = loans.copy()
+    loans_copy['issue_d'] = pd.to_datetime(loans_copy['issue_d'], format='%b-%Y')
+    loans_copy['term'] = loans_copy['term'].str.strip('months').astype(int) #should use str.lower() for series, astype cast panda series/df
+    loans_copy['emp_title'] = loans_copy['emp_title'].str.lower().str.strip() #apply to emp_title col
+    loans_copy['emp_title'] = loans_copy['emp_title'].apply(lambda x: 'registered nurse' if x == 'rn' else x) #if title specifically rn
+    loans_copy['term_end'] = pd.to_datetime(loans_copy['issue_d'] + loans_copy['term'].apply(lambda x: pd.DateOffset(months = x)))
 
-# Extract the content between the START and END markers
-    start_indx = text.find("***\n") + 3
-    end_indx = text.find("*** END OF THE PROJECT GUTENBERG")
-    return text[start_indx:end_indx] 
+    return loans_copy
+
 
 
 # ---------------------------------------------------------------------
 # QUESTION 2
 # ---------------------------------------------------------------------
 
+def correlations(df, pairs):
+    result = {}
 
-def tokenize(book_string):
-    if not book_string or book_string.isspace():
-        return ['\x02', '\x03']
+    for col1, col2 in pairs:
+        
+        correlation = df[col1].corr(df[col2])
+        
+        result[f'r_{col1}_{col2}'] = correlation
     
-    text_with_markers = re.sub(r'\n\s*\n+', '\x03\x02', book_string.strip())
+    return pd.Series(result)
 
-    marked_text = '\x02' + text_with_markers + '\x03'
-    pattern = r'(\x02|\x03|\w+(?:_\w+)*|[^\w\s_]|\w+)'
-    return re.findall(pattern, marked_text)
 
 
 # ---------------------------------------------------------------------
@@ -63,281 +68,266 @@ def tokenize(book_string):
 # ---------------------------------------------------------------------
 
 
-class UniformLM(object):
-    def __init__(self, tokens):
-        self.mdl = self.train(tokens)
-        
-    def train(self, tokens):
-        # uniq_tokens = set(tokens)
-        # num_uniq = len(uniq_tokens)
-        # if num_uniq != 0:
-        #     probab = np.ones(num_uniq) * (1/num_uniq)
-        # else:
-        #     probab = np.array()
-        
-        # return pd.Series(probab, index=uniq_tokens)
-        token = set(tokens)
-        return pd.Series([1 / len(token)] * len(token), index=token)
-    
-        
-    def probability(self, words):
-        prob_seq = 1
-        for token in words:
-            if token not in self.mdl.index:
-                return 0
-                # prob_token = self.mdl.loc[token]
-            # else:
-                prob_token = 0
-            prob_seq *= self.mdl.loc[token]
+def create_boxplot(loans):
+    loans_c= loans.copy()
+    bins = [580, 670, 740, 800, 850]
+    labels = ["[580, 670)", "[670, 740)", "[740, 800)", "[800, 850)"]
 
-        return prob_seq
+    loans_c['Credit Score Range'] = pd.cut(loans_c['fico_range_low'], bins=bins, labels=labels, right=False)
+    loans_c['Credit Score Range'] = pd.Categorical(loans_c['Credit Score Range'], categories=labels, ordered=True)
 
-    def sample(self, M):
-        return " ".join(np.random.choice(list(self.mdl.index), M, list(self.mdl)))
+    loans_c['term'] = loans_c['term'].astype(str)
+
+    pixels = px.box(
+        loans_c,
+        x='Credit Score Range',
+        y='int_rate',
+        color='term',  
+        title='Interest Rate vs. Credit Score',
+        labels={
+            'int_rate': 'Interest Rate (%)',
+            'term': 'Loan Length (Months)',
+            'Credit Score Range': 'Credit Score Range'
+        },
+        category_orders={"Credit Score Range": labels,  "term": [ "36", "60"]},  
+        color_discrete_map={'36': 'yellow', '60': 'blue'}  
+    )
+
+    return pixels
+
 
 # ---------------------------------------------------------------------
 # QUESTION 4
 # ---------------------------------------------------------------------
 
-class UnigramLM(object):
-    def __init__(self, tokens):
-        self.mdl = self.train(tokens)
-    
-    def train(self, tokens):
-       return pd.Series(tokens).value_counts(normalize=True)
-    
-    def probability(self, words):
-        prob_seq = 1
-        for token in words:
-            if token in self.mdl.index:
-                prob_token = self.mdl.loc[token]
-            else:
-                return 0
-            prob_seq *= prob_token
-        return prob_seq
 
-    def sample(self, M):
-        return ' '.join(self.mdl.sample(n=M, replace=True, weights=self.mdl).index)
+def ps_test(loans, N):
+    with_statement = loans[loans['desc'].notna()]['int_rate']
+    without_statement = loans[loans['desc'].isna()]['int_rate']
+    
+    observed_stat = with_statement.mean() - without_statement.mean()
+    
+    null_stats = []
+    for _ in range(N):
+        
+        permuted = np.random.permutation(loans['int_rate'].values)
+        
+        perm_with = permuted[:len(with_statement)]
+        perm_without = permuted[len(with_statement):]
+        
+        null_stats.append(perm_with.mean() - perm_without.mean())
+    
+    null_stats = np.array(null_stats)
+    p_value = (null_stats >= observed_stat).mean()
+    
+    return p_value
+    
+def missingness_mechanism():
+    return 2
+    
+def argument_for_nmar():
+    '''
+    Put your justification here in this multi-line string.
+    Make sure to return your string!
+    '''
+    out = '''Some personal statements may be missing not at random 
+    if applicants with higher risk profiles are less likely to include them, 
+    since applications with higher risk might not want to include their profiles because they don't want to get caught'''
+    return out
+
 
 # ---------------------------------------------------------------------
 # QUESTION 5
 # ---------------------------------------------------------------------
 
 
-class NGramLM(object):
-    
-    def __init__(self, N, tokens):
-        # You don't need to edit the constructor,
-        # but you should understand how it works!
+def tax_owed(income, brackets):
+    tax = 0.0 
+    for i in range(len(brackets)):
         
-        self.N = N
-
-        ngrams = self.create_ngrams(tokens)
-
-        self.ngrams = ngrams
-        self.mdl = self.train(ngrams)
-
-        if N < 2:
-            raise Exception('N must be greater than 1')
-        elif N == 2:
-            self.prev_mdl = UnigramLM(tokens)
+        rate, lower_limit = brackets[i]
+    
+        if i == len(brackets) - 1:
+            if income > lower_limit:
+                tax += (income - lower_limit) * rate
         else:
-            self.prev_mdl = NGramLM(N-1, tokens)
-
-    def create_ngrams(self, tokens):
-        all_tuples = []
-        for i in range(len(tokens) - (self.N-1)):
-            the_lst_tuple = []
-            for j in range(self.N):
-                the_lst_tuple.append(tokens[i+j])
-            
-            the_tuple = tuple(the_lst_tuple)
-            all_tuples.append(the_tuple)
-        
-        return all_tuples
-
-        
-    def train(self, ngrams):
-        # N-Gram counts C(w_1, ..., w_n)
-        cleaned_ngrams = [tuple('' if token in ['\x02', '\x03'] else token for token in ngram) for ngram in ngrams]
-        df_ngrams = pd.DataFrame()
-        df_ngrams['ngram'] = pd.Series(ngrams)
-        value_count = df_ngrams['ngram'].value_counts()
-        df_ngrams['ngram_count'] = df_ngrams['ngram'].map(value_count)
-
-        # (N-1)-Gram counts C(w_1, ..., w_(n-1))
-        n_min1 = []
-        for ngram in list(df_ngrams['ngram']):
-            new_tuple = ngram[:-1]
-            n_min1.append(new_tuple)
-
-        df_ngrams['n1gram'] = pd.Series(n_min1)
-        value_count_min1 = df_ngrams['n1gram'].value_counts()
-        df_ngrams['n1gram_count'] = df_ngrams['n1gram'].map(value_count_min1)
-
-        # Create the conditional probabilities
-        ngram_probs = df_ngrams['ngram_count']/df_ngrams['n1gram_count']
-        df_ngrams['prob'] = ngram_probs
-        
-        # Put it all together
-        return df_ngrams[['ngram', 'n1gram', 'prob']].drop_duplicates(subset=['ngram'])
+            upper_rate, upper_limit = brackets[i + 1]
+            if income > lower_limit:
+                taxable_income = min(income, upper_limit) - lower_limit
+                tax += taxable_income * rate
     
-    def probability(self, words):
-        prob = 1
-        num = self.N
-        token_lst = []
-        for i in range(len(words)):
-            token_lst.append(tuple(words[max(0, i-num+1):i+1]))
+    return tax
+
+
+# ---------------------------------------------------------------------
+# QUESTION 6
+# ---------------------------------------------------------------------
+
+
+def clean_state_taxes(state_taxes_raw): 
+    state_taxes_cleaned = state_taxes_raw.dropna(how='all').copy() #rows completely null
+
+    state_taxes_cleaned['State'] = state_taxes_cleaned['State'].apply(
+        lambda x: x if isinstance(x, str) and x[0].isalpha() else None
+    ).ffill()
+
+    state_taxes_cleaned['Rate'] = state_taxes_cleaned['Rate'].str.replace('%', '').replace('none', '0').fillna(0).astype(float)
+    
+    state_taxes_cleaned['Rate'] = pd.to_numeric(state_taxes_cleaned['Rate']) / 100
+    
+    state_taxes_cleaned['Rate'] = state_taxes_cleaned['Rate'].round(2)
+    
+    state_taxes_cleaned['Lower Limit'] = state_taxes_cleaned['Lower Limit'].replace('[\$,]', '', regex=True)
+    state_taxes_cleaned['Lower Limit'] = pd.to_numeric(state_taxes_cleaned['Lower Limit'], errors='coerce').fillna(0).astype(int)
+    
+    return state_taxes_cleaned
+
+
+# ---------------------------------------------------------------------
+# QUESTION 7
+# ---------------------------------------------------------------------
+
+
+def state_brackets(state_taxes):
+    out = state_taxes.copy()
+   
+    out = out.groupby('State').apply(lambda x: list(zip(x['Rate'], x['Lower Limit']))).reset_index()
+    out.columns = ['State','bracket_list']
+
+    return out.set_index('State')
+
+    
+def combine_loans_and_state_taxes(loans, state_taxes):
+    # Start by loading in the JSON file.
+    # state_mapping is a dictionary; use it!
+    import json
+    state_mapping_path = Path('data') / 'state_mapping.json'
+    with open(state_mapping_path, 'r') as f:
+        state_mapping = json.load(f)
         
-        for token in token_lst:
-            count = num
-            current = self
-            if len(token) == 1:
-                while count > 1:
-                    current = current.prev_mdl
-                    count -= 1
-
-                prob *= current.mdl.get(token[0],0)
-            
-            else:
-                morethan1 = count - len(token)
-                for j in range(morethan1):
-                    current = current.prev_mdl
-                df = current.mdl
-                need = df[(df['ngram'] == token) & (df['n1gram'] == token[:-1])]
-                try:
-                    prob *= need.iloc[0, -1]
-                except IndexError:
-                    return 0
-            
-        return prob
+    # Now it's your turn:
+    loans_copyy = loans.copy()
+    gf = state_taxes.copy()
+    gf['State'] = gf['State'].apply(lambda x: state_mapping[x])
+    new_data = state_brackets(gf)
+    out = loans_copyy.merge(new_data, left_on = 'addr_state', right_index = True)
     
-
-    def sample(self, M):
-
-        # Use a helper function to ge/sample tokens of length `length`
-        all_tokens = ['\x02']
+    out = out.rename(columns = {'addr_state': 'State'}) 
     
-        for i in range(M-1):
-            current = self
-            # num_iter = self.N - 3
-            # for j in range(num_iter):
-            #     current = current.prev_mdl
+    return out
 
 
-            # if there's already one value in the list
-            if len(all_tokens) == 1:
-                for j in range(self.N - 2):
-                    current = current.prev_mdl
+# ---------------------------------------------------------------------
+# QUESTION 8
+# ---------------------------------------------------------------------
 
-                df = current.mdl
-                # display(df)
-                needed = df[df['ngram'].str[0] == '\x02']
-                needed_vals = needed['ngram'].str[1].value_counts()
-                # display(needed_vals)
-                cond_prob = needed_vals/needed_vals.sum()
-            
-            #if there's less than N values in the list
-            elif len(all_tokens) < self.N:
 
-                for j in range(self.N - len(all_tokens) - 1):
-                    current = current.prev_mdl
-
-                df = current.mdl
-                # display(df)
-                # print(i)
-                needed = df[df['n1gram'].str[:current.N-1] == tuple(all_tokens[-(current.N - 1):])]
-            
-                #display(needed)
-                needed_vals = needed['ngram'].str[-1].value_counts()
-                cond_prob = needed_vals/needed_vals.sum()
-            else:
+def find_disposable_income(loans_with_state_taxes):
+    FEDERAL_BRACKETS = [
+     (0.1, 0), 
+     (0.12, 11000), 
+     (0.22, 44725), 
+     (0.24, 95375), 
+     (0.32, 182100),
+     (0.35, 231251),
+     (0.37, 578125)
+    ]
+    copy_loans = loans_with_state_taxes.copy()
+    def calculate_tax(income, brackets):
+        tax = 0 
+        for i in range(len(brackets)): #for multuple tup
+            #take out orig brackets
+            rate, lower_limit = brackets[i]
+            if income > lower_limit:
+                #check if income falls the last bracket, then check if income is in the current bracket
+                if i == len(brackets) - 1 or income < brackets[i + 1][1]:
+                    tax += rate * (income - lower_limit)
+                    break
+                    
+                else:
+                    tax += rate * (brackets[i + 1][1] - lower_limit)
                 
-                df = current.mdl
-                # display(df)
-                # print(all_tokens[-(self.N - 1):])
-                # display(df['n1gram'].str[:self.N-1])
-                # display(all_tokens[-(self.N - 1):])
-                needed = df[df['n1gram'].str[:self.N-1] == tuple(all_tokens[-(self.N - 1):])]
-                # display(needed)
+        return tax
 
-                needed_vals = needed['ngram'].str[-1].value_counts()
-                cond_prob = needed_vals/needed_vals.sum()
-                # for k in range(self.N):
-                #     display(needed)
-                #     print(all_tokens[-(self.N-k)])
-                #     
-                # display(needed)
-            if len(needed) == 0:
-                all_tokens.append('\x03')
-            
-            else:
-                generate_token = np.random.choice(cond_prob.index, p=cond_prob.values)
-                # print(generate_token)
-                all_tokens.append(generate_token)
-            # print(all_tokens)
-        # Transform the tokens to strings
-        all_tokens.append('\x03')
+    copy_loans['federal_tax_owed'] = copy_loans['annual_inc'].apply(
+        lambda income: calculate_tax(income, FEDERAL_BRACKETS)
+    )
+    
+    copy_loans['state_tax_owed'] = copy_loans.apply(
+        lambda row: calculate_tax(row['annual_inc'], row['bracket_list']), axis=1
+    )
+    
+    copy_loans['disposable_income'] = (
+        copy_loans['annual_inc'] - 
+        copy_loans['federal_tax_owed'] - 
+        copy_loans['state_tax_owed']
+    )
+    
+    return copy_loans
+
+
+# ---------------------------------------------------------------------
+# QUESTION 9
+# ---------------------------------------------------------------------
+
+
+def aggregate_and_combine(loans, keywords, quantitative_column, categorical_column):
+    result_dict = {}
+    
+    for keyword in keywords:
         
-        return ' '.join(all_tokens)
+        keyword_df = loans[loans['emp_title'].str.contains(keyword, case=False)]
+        
+        grouped_means = round(keyword_df.groupby(categorical_column)[quantitative_column].mean(), 2)
+        
+        overall_mean = round(keyword_df[quantitative_column].mean(), 2)
+        
+        grouped_means['Overall'] = overall_mean
+
+        result = keyword + "_mean_" + quantitative_column
+        
+        result_dict[result] = grouped_means
+    
+    result_df = pd.DataFrame(result_dict)
+    
+    return result_df
 
 
+# ---------------------------------------------------------------------
+# QUESTION 10
+# ---------------------------------------------------------------------
+
+
+def exists_paradox(loans, keywords, quantitative_column, categorical_column):
+    keywords = [k.lower() for k in keywords]
+    
+    group1 = loans[loans['emp_title'].str.contains(keywords[0], case= False)]
+    group2 = loans[loans['emp_title'].str.contains(keywords[1], case= False)]
+
+    overall_mean_group1 = group1[quantitative_column].mean()
+    overall_mean_group2 = group2[quantitative_column].mean()
+    
+    category_means_group1 = group1.groupby(categorical_column)[quantitative_column].mean()
+    category_means_group2 = group2.groupby(categorical_column)[quantitative_column].mean()
+
+    #check if contains paradox
+    paradox_found = False
+    
+    for category in category_means_group1.index:
+        
+        if category in category_means_group2.index:
             
-        #     if len(all_tokens) == 1:
-        #         needed = df[df['ngram'].str[0] == '\x02']
-        #         # display(needed)
-        #         needed_vals = needed['ngram'].str[1].value_counts()
-        #         cond_prob = needed_vals/needed_vals.sum()
-            
-        #     else:
-        #         # print(all_tokens)
-        #         needed = df[df['ngram'].str[0] == all_tokens[-(self.N - 1)]]
-        #         for k in range(1, min(self.N-1, i-1)):
-        #             needed = needed[needed['ngram'].str[k] == all_tokens[-(self.N + k)]]
+            if (overall_mean_group1 > overall_mean_group2 and category_means_group1[category] < category_means_group2[category]) or \
+               (overall_mean_group1 < overall_mean_group2 and category_means_group1[category] > category_means_group2[category]):
+                paradox_found = True
                 
-        #         needed_vals = needed['ngram'].str[-1].value_counts()
-        #         cond_prob = needed_vals/needed_vals.sum()
-
-        #     if len(needed) == 0:
-        #         all_tokens.append('\x03')
-            
-        #     else:
-        #         generate_token = np.random.choice(cond_prob.index, p=cond_prob.values)
-        #         all_tokens.append(generate_token)
-        
-        # # Transform the tokens to strings
-        # if all_tokens[-1] != '\x03':
-        #     all_tokens.append('\x03')
-        # return ' '.join(all_tokens)
-
-
-
-
-
-
-        # def find_next(self, context):
-        #     model = self
-        #     current_count = self.N - 1
-        #     if len(context) < self.N:
-        #         while current_count > len(context):
-        #             model = model.prev_mdl
-        #             current_count -= 1
-
-        #     model = model.mdl
-        #     model = model[model['n1gram'] == context]
-        #     choices = [ngram[-1] for ngram in model['ngram']]
-        #     choices_prob = model['prob'].tolist()
-        #     if len(choices) == 0:
-        #         return '\x03'
-        #     return str(np.random.choice(choices, p=choices_prob))
-
-        # tokens = ['\x02']
-        # token_count = 0
-        # while token_count < M - 1:
-        #     tokens.append(find_next(self, tuple(tokens[-(self.N + 1):])))
-        #     token_count += 1
-        #     if (token_count < M - 2) & (tokens[-1] == '\x03'):
-        #         tokens.append('\x02')
-        #         token_count += 1
-        # tokens.append('\x03')
-        # return ' '.join(tokens)
+                break
+    return paradox_found
+    
+def paradox_example(loans):
+    return {
+        'loans': loans,
+        'keywords': ['teacher', 'manager'], 
+        'quantitative_column': 'int_rate', 
+        'categorical_column': 'verification_status' 
+    }
